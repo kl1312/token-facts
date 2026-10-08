@@ -83,4 +83,66 @@ function decodeUint(result: string | null): bigint | null {
   }
 }
 
-decodeAddress function missing placeholder
+function decodeAddress(result: string | null): string | null {
+  if (!result) return null;
+  const clean = result.startsWith("0x") ? result.slice(2) : result;
+  if (clean.length < 40) return null;
+  return `0x${clean.slice(-40)}`;
+}
+
+function formatSupply(raw: bigint, decimals: number): string {
+  const base = 10n ** BigInt(decimals);
+  const integer = raw / base;
+  const fraction = (raw % base).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return fraction ? `${integer.toString()}.${fraction}` : integer.toString();
+}
+
+export function isEvmAddress(address: string): boolean {
+  return ADDRESS_RE.test(address);
+}
+
+export async function readEvm(chain: Exclude<Chain, "solana">, address: string): Promise<BasicReport> {
+  if (!isEvmAddress(address)) throw new RpcError("Not an EVM address", 400);
+
+  const [nameRaw, symbolRaw, decimalsRaw, supplyRaw, ownerRaw] = await Promise.all([
+    ethCall(chain, address, SELECTORS.name),
+    ethCall(chain, address, SELECTORS.symbol),
+    ethCall(chain, address, SELECTORS.decimals),
+    ethCall(chain, address, SELECTORS.totalSupply),
+    ethCall(chain, address, SELECTORS.owner),
+  ]);
+
+  const decimalsValue = decodeUint(decimalsRaw);
+  if (decimalsValue === null && decodeUint(supplyRaw) === null) {
+    throw new RpcError("No token methods returned. Not an ERC-20, or RPC failed.", 400);
+  }
+
+  const decimals = Number(decimalsValue ?? 0n);
+  const supply = decodeUint(supplyRaw);
+  const owner = decodeAddress(ownerRaw);
+  const rows: FactRow[] = [
+    row("Address", address),
+    row("Chain", chain),
+    row("Name", decodeString(nameRaw) ?? "not returned"),
+    row("Symbol", decodeString(symbolRaw) ?? "not returned"),
+    row("Decimals", decimalsValue === null ? "not returned" : String(decimals)),
+    row("Supply", supply === null ? "not returned" : formatSupply(supply, decimals)),
+    row("Raw supply", supply === null ? "not returned" : supply.toString()),
+  ];
+
+  if (!owner) {
+    rows.push(row("Owner", "no owner()", "green"));
+  } else if (owner.toLowerCase() === ZERO) {
+    rows.push(row("Owner", owner, "green"));
+  } else {
+    rows.push(row("Owner", owner, "red"));
+  }
+
+  return {
+    chain,
+    address,
+    cached: false,
+    fetchedAt: new Date().toISOString(),
+    rows,
+  };
+}
